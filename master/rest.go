@@ -16,6 +16,8 @@ package master
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -353,8 +355,18 @@ func (m *Master) dashboard(response http.ResponseWriter, request *http.Request) 
 	if request.RequestURI == "/" || os.IsNotExist(err) {
 		if !m.checkLogin(request) {
 			if m.Config.OIDC.Enable {
-				// Redirect to OIDC login
-				http.Redirect(response, request, m.oauth2Config.AuthCodeURL(""), http.StatusFound)
+				// Redirect to OIDC login. The state is kept in a short-lived cookie and checked in
+				// handleOAuth2Callback (RFC 6749 §10.12); providers such as Pocket ID reject an empty state.
+				state := rand.Text()
+				http.SetCookie(response, &http.Cookie{
+					Name:     oauth2StateCookie,
+					Value:    state,
+					Path:     "/callback/oauth2",
+					MaxAge:   600,
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+				http.Redirect(response, request, m.oauth2Config.AuthCodeURL(state), http.StatusFound)
 			} else {
 				http.Redirect(response, request, "/login", http.StatusFound)
 				log.Logger().Info(fmt.Sprintf("%s %s", request.Method, request.URL), zap.Int("status_code", http.StatusFound))
@@ -2072,9 +2084,22 @@ func (m *Master) restore(response http.ResponseWriter, request *http.Request) {
 	server.Ok(restful.NewResponse(response), stats)
 }
 
+const oauth2StateCookie = "oauth2_state"
+
 func (m *Master) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// Verify state and errors.
-	oauth2Token, err := m.oauth2Config.Exchange(r.Context(), r.URL.Query().Get("code"))
+	query := r.URL.Query()
+	stateCookie, err := r.Cookie(oauth2StateCookie)
+	if err != nil || stateCookie.Value == "" || subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(query.Get("state"))) != 1 {
+		server.BadRequest(restful.NewResponse(w), errors.New("invalid oauth2 state"))
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauth2StateCookie, Path: "/callback/oauth2", MaxAge: -1})
+	if e := query.Get("error"); e != "" {
+		server.BadRequest(restful.NewResponse(w), errors.Errorf("oauth2: %s: %s", e, query.Get("error_description")))
+		return
+	}
+	oauth2Token, err := m.oauth2Config.Exchange(r.Context(), query.Get("code"))
 	if err != nil {
 		server.InternalServerError(restful.NewResponse(w), err)
 		return

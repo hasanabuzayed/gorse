@@ -22,6 +22,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,6 +46,7 @@ import (
 	"github.com/steinfletcher/apitest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -1289,4 +1291,41 @@ func (suite *MasterAPITestSuite) TestChatCompletionsStream() {
 
 func TestMasterAPI(t *testing.T) {
 	suite.Run(t, new(MasterAPITestSuite))
+}
+
+func TestOAuth2State(t *testing.T) {
+	m := &Master{}
+	m.Config = config.GetDefaultConfig()
+	m.Config.OIDC.Enable = true
+	m.oauth2Config = oauth2.Config{ClientID: "gorse", Endpoint: oauth2.Endpoint{AuthURL: "https://idp.example.com/authorize"}}
+
+	// The login redirect carries a random state that matches the state cookie.
+	w := httptest.NewRecorder()
+	m.dashboard(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusFound, w.Code)
+	location, err := url.Parse(w.Header().Get("Location"))
+	assert.NoError(t, err)
+	state := location.Query().Get("state")
+	assert.NotEmpty(t, state)
+	cookies := w.Result().Cookies()
+	if assert.Len(t, cookies, 1) {
+		assert.Equal(t, oauth2StateCookie, cookies[0].Name)
+		assert.Equal(t, state, cookies[0].Value)
+	}
+
+	// The callback rejects a missing cookie, a mismatched state and a provider error.
+	for _, tc := range []struct{ cookie, query string }{
+		{"", "?state=" + state + "&code=x"},
+		{state, "?state=other&code=x"},
+		{"", "?state=&code=x"},
+		{state, "?state=" + state + "&error=invalid_scope"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/callback/oauth2"+tc.query, nil)
+		if tc.cookie != "" {
+			r.AddCookie(&http.Cookie{Name: oauth2StateCookie, Value: tc.cookie})
+		}
+		w = httptest.NewRecorder()
+		m.handleOAuth2Callback(w, r)
+		assert.Equal(t, http.StatusBadRequest, w.Code, tc.query)
+	}
 }
