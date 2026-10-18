@@ -1313,6 +1313,15 @@ func TestOAuth2State(t *testing.T) {
 		assert.Equal(t, state, cookies[0].Value)
 	}
 
+	// A second unauthenticated request (e.g. /favicon.ico) keeps the state of the login in progress.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: oauth2StateCookie, Value: state})
+	w = httptest.NewRecorder()
+	m.dashboard(w, r)
+	location, err = url.Parse(w.Header().Get("Location"))
+	assert.NoError(t, err)
+	assert.Equal(t, state, location.Query().Get("state"))
+
 	// The callback rejects a missing cookie, a mismatched state and a provider error.
 	for _, tc := range []struct{ cookie, query string }{
 		{"", "?state=" + state + "&code=x"},
