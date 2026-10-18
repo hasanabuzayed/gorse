@@ -357,11 +357,16 @@ func (m *Master) dashboard(response http.ResponseWriter, request *http.Request) 
 			if m.Config.OIDC.Enable {
 				// Redirect to OIDC login. The state is kept in a short-lived cookie and checked in
 				// handleOAuth2Callback (RFC 6749 §10.12); providers such as Pocket ID reject an empty state.
+				// An existing state is reused: unauthenticated asset requests (e.g. /favicon.ico) land here
+				// too and must not replace the state of a login already in progress.
 				state := rand.Text()
+				if c, err := request.Cookie(oauth2StateCookie); err == nil && c.Value != "" {
+					state = c.Value
+				}
 				http.SetCookie(response, &http.Cookie{
 					Name:     oauth2StateCookie,
 					Value:    state,
-					Path:     "/callback/oauth2",
+					Path:     "/",
 					MaxAge:   600,
 					HttpOnly: true,
 					SameSite: http.SameSiteLaxMode,
@@ -2115,7 +2120,7 @@ func (m *Master) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		server.BadRequest(restful.NewResponse(w), errors.New("invalid oauth2 state"))
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: oauth2StateCookie, Path: "/callback/oauth2", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: oauth2StateCookie, Path: "/", MaxAge: -1})
 	if e := query.Get("error"); e != "" {
 		server.BadRequest(restful.NewResponse(w), errors.Errorf("oauth2: %s: %s", e, query.Get("error_description")))
 		return
